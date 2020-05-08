@@ -16,11 +16,12 @@ import (
 	"golang.org/x/net/html/atom"
 )
 
-const defaultParallel = 10
+const defaultParallel = 15
 
 type Website struct {
-	Pages []*Page `json:"pages"`
-	URL   string  `json:"url"`
+	Pages  []*Page  `json:"pages"`
+	URL    string   `json:"url"`
+	Errors []string `json:"errors"`
 }
 
 type Page struct {
@@ -41,14 +42,14 @@ type OpenGraph struct {
 }
 
 type Crawler struct {
-	Sites    []string                             // At least one URL.
-	Out      io.Writer                            // Required. Writes one detected site per line.
-	Log      *log.Logger                          // Required. Errors are reported here.
-	Depth    int                                  // Optional. Limit depth. Set to >= 1.
-	Parallel int                                  // Optional. Set how many sites to crawl in parallel.
-	Delay    time.Duration                        // Optional. Set delay between crawls.
-	Get      func(string) (*http.Response, error) // Optional. Defaults to http.Get.
-	Verbose  bool                                 // Optional. If set, status updates are written to logger.
+	Sites    []string
+	Out      io.Writer
+	Log      *log.Logger
+	Depth    int
+	Parallel int
+	Delay    time.Duration
+	Get      func(string) (*http.Response, error)
+	Verbose  bool
 }
 
 type site struct {
@@ -58,10 +59,12 @@ type site struct {
 }
 
 var pages []*Page
+var notFoundErrors []string
 
 func (c *Crawler) Run(siteUrl string) (*Website, error) {
 	// Clears slice on each new request
 	pages = pages[:0]
+	notFoundErrors = notFoundErrors[:0]
 
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -74,7 +77,6 @@ func (c *Crawler) Run(siteUrl string) (*Website, error) {
 		return nil, err
 	}
 
-	// Collect results via channel since it is not guarantied that the output writer works concurrent
 	results := make(chan string)
 	defer close(results)
 	go func() {
@@ -94,7 +96,6 @@ func (c *Crawler) Run(siteUrl string) (*Website, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Pass channels to each worker
 			c.worker(sites, queue, wait, results)
 		}()
 	}
@@ -109,7 +110,7 @@ func (c *Crawler) Run(siteUrl string) (*Website, error) {
 
 	wg.Wait()
 
-	return &Website{Pages: pages, URL: siteUrl}, nil
+	return &Website{Pages: pages, URL: siteUrl, Errors: notFoundErrors}, nil
 }
 
 func (c Crawler) validate() error {
@@ -131,9 +132,6 @@ func (c Crawler) validate() error {
 	return nil
 }
 
-// Returns a list of only valid URLs.
-// Invalid protocols such as mailto or javascript are ignored.
-// The returned error shows all invalid URLs in one message.
 func toURLs(links []string, parse func(string) (*url.URL, error)) (urls []*url.URL, err error) {
 	var invalids []string
 	for _, s := range links {
@@ -164,9 +162,6 @@ func parallel(p int) int {
 	return p
 }
 
-// Track visited sites via channel to prevent conflicts
-// and ensure each site is visited only once.
-// All channels are closed automatically as soon as queue is empty.
 func makeQueue() (chan<- site, <-chan site, chan<- int) {
 	queueCount := 0
 	wait := make(chan int)
@@ -265,9 +260,9 @@ func crawlSite(s site, get func(string) (*http.Response, error)) ([]string, bool
 	}
 	defer r.Body.Close()
 
-	// if r.StatusCode >= 400 {
-	// 	return nil, false, fmt.Errorf("%d %v", r.StatusCode, u)
-	// }
+	if r.StatusCode >= 404 && r.StatusCode < 800 {
+		notFoundErrors = append(notFoundErrors, fmt.Sprintf("%d %v", r.StatusCode, u))
+	}
 
 	// Stop when redirecting to external page
 	if r.Request.URL.Host != u.Host {
@@ -325,8 +320,6 @@ func queueURLs(queue chan<- site, urls []*url.URL, parent *url.URL, depth int) {
 		}
 	}
 }
-
-var visited = make(map[string]bool)
 
 // // Gets Og data related to page
 func (p Page) getOgData(uri string) Page {

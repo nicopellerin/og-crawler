@@ -1,0 +1,19 @@
+{
+  "name": "og-crawler",
+  "builds": [
+    {
+      "src": "index.go",
+      "use": "@now/go"
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.go"
+    },
+    {
+      "source": "/",
+      "destination": "/index.go"
+    }
+  ]
+}
