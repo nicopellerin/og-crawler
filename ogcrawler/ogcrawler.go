@@ -115,19 +115,19 @@ func (c *Crawler) Run(siteUrl string) (*Website, error) {
 
 func (c Crawler) validate() error {
 	if len(c.Sites) == 0 {
-		return errors.New("no sites given")
+		return errors.New("No sites given")
 	}
 	if c.Out == nil {
-		return errors.New("no output writer given")
+		return errors.New("No output writer given")
 	}
 	if c.Log == nil {
-		return errors.New("no error logger given")
+		return errors.New("No error logger given")
 	}
 	if c.Depth < 0 {
-		return errors.New("depth cannot be negative")
+		return errors.New("Depth cannot be negative")
 	}
 	if c.Parallel < 0 {
-		return errors.New("parallel cannot be negative")
+		return errors.New("Parallel cannot be negative")
 	}
 	return nil
 }

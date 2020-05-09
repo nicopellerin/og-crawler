@@ -1,5 +1,4 @@
 {
-  "name": "og-crawler",
   "builds": [
     {
       "src": "index.go",
