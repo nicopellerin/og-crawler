@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"strings"
 	"sync"
-	"time"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -47,7 +46,6 @@ type Crawler struct {
 	Log      *log.Logger
 	Depth    int
 	Parallel int
-	Delay    time.Duration
 	Get      func(string) (*http.Response, error)
 	Verbose  bool
 }
@@ -231,7 +229,6 @@ func (c Crawler) worker(
 		// Submit links to queue in goroutine to not block workers
 		go queueURLs(queue, urls, s.URL, s.Depth-1)
 
-		time.Sleep(c.Delay)
 	}
 }
 
