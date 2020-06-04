@@ -24,8 +24,8 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	var errWriter io.Writer = os.Stderr
 	errs := log.New(errWriter, "", 0)
 
-	c := ogcrawler.Crawler{Sites: []string{string(siteURL)}, Depth: 5, Out: output, Log: errs}
-	website, _ := c.Run(string(siteURL))
+	c := ogcrawler.Crawler{Site: string(siteURL), Out: output, Log: errs}
+	website, _ := c.Run()
 
 	bs, err := json.Marshal(website)
 	if err != nil {

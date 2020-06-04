@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -41,13 +42,12 @@ type OpenGraph struct {
 }
 
 type Crawler struct {
-	Sites    []string
+	Site     string
 	Out      io.Writer
 	Log      *log.Logger
 	Depth    int
 	Parallel int
 	Get      func(string) (*http.Response, error)
-	Verbose  bool
 }
 
 type site struct {
@@ -59,7 +59,8 @@ type site struct {
 var pages []*Page
 var notFoundErrors []string
 
-func (c *Crawler) Run(siteUrl string) (*Website, error) {
+// Run - Starts process
+func (c *Crawler) Run() (*Website, error) {
 	// Clears slice on each new request
 	pages = pages[:0]
 	notFoundErrors = notFoundErrors[:0]
@@ -70,50 +71,39 @@ func (c *Crawler) Run(siteUrl string) (*Website, error) {
 	if c.Get == nil {
 		c.Get = http.Get
 	}
-	urls, err := toURLs(c.Sites, url.Parse)
-	if err != nil {
-		return nil, err
-	}
-
-	results := make(chan string)
-	defer close(results)
-	go func() {
-		for r := range results {
-			if _, err := fmt.Fprintln(c.Out, r); err != nil {
-				c.Log.Printf("failed to write output '%s': %v\n", r, err)
-			}
-		}
-	}()
 
 	queue, sites, wait := makeQueue()
 
-	wait <- len(urls)
+	wait <- 1
 
 	var wg sync.WaitGroup
 	for i := 0; i < parallel(c.Parallel); i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c.worker(sites, queue, wait, results)
+			c.worker(sites, queue, wait)
 		}()
 	}
 
-	for _, u := range urls {
-		queue <- site{
-			URL:    u,
-			Parent: nil,
-			Depth:  c.Depth,
-		}
+	s, err := url.Parse(c.Site)
+	if err != nil {
+		panic(err)
+	}
+
+	queue <- site{
+		URL:    s,
+		Parent: nil,
+		Depth:  c.Depth,
 	}
 
 	wg.Wait()
 
-	return &Website{Pages: pages, URL: siteUrl, Errors: notFoundErrors}, nil
+	return &Website{Pages: pages, URL: c.Site, Errors: notFoundErrors}, nil
 }
 
 func (c Crawler) validate() error {
-	if len(c.Sites) == 0 {
-		return errors.New("No sites given")
+	if len(c.Site) == 0 {
+		return errors.New("No site given")
 	}
 	if c.Out == nil {
 		return errors.New("No output writer given")
@@ -130,19 +120,22 @@ func (c Crawler) validate() error {
 	return nil
 }
 
-func toURLs(links []string, parse func(string) (*url.URL, error)) (urls []*url.URL, err error) {
+func toURLs(links []string, parse func(string) (*url.URL, error)) ([]*url.URL, error) {
 	var invalids []string
+	var urls []*url.URL
+	var err error
+
 	for _, s := range links {
-		u, e := parse(s)
-		if e != nil {
-			invalids = append(invalids, fmt.Sprintf("%s (%v)", s, e))
+		u, err := parse(s)
+		if err != nil {
+			invalids = append(invalids, fmt.Sprintf("%s (%v)", s, err))
 			continue
 		}
-		// Default to https
+
 		if u.Scheme == "" {
 			u.Scheme = "https"
 		}
-		// Ignore invalid protocols
+
 		if u.Scheme == "http" || u.Scheme == "https" {
 			urls = append(urls, u)
 		}
@@ -150,7 +143,7 @@ func toURLs(links []string, parse func(string) (*url.URL, error)) (urls []*url.U
 	if len(invalids) > 0 {
 		err = fmt.Errorf("invalid URLs: %v", strings.Join(invalids, ", "))
 	}
-	return
+	return urls, err
 }
 
 func parallel(p int) int {
@@ -165,7 +158,7 @@ func makeQueue() (chan<- site, <-chan site, chan<- int) {
 	wait := make(chan int)
 	sites := make(chan site)
 	queue := make(chan site)
-	visited := map[string]struct{}{}
+	visited := make(map[string]bool)
 
 	go func() {
 		for delta := range wait {
@@ -180,7 +173,7 @@ func makeQueue() (chan<- site, <-chan site, chan<- int) {
 		for s := range queue {
 			u := s.URL.String()
 			if _, v := visited[u]; !v {
-				visited[u] = struct{}{}
+				visited[u] = true
 				sites <- s
 			} else {
 				wait <- -1
@@ -197,63 +190,32 @@ func (c Crawler) worker(
 	sites <-chan site,
 	queue chan<- site,
 	wait chan<- int,
-	results chan<- string,
 ) {
 	for s := range sites {
-		if c.Verbose {
-			c.Log.Printf("verbose: GET %s\n", s.URL)
-		}
-
-		links, shouldUpdate, err := crawlSite(s, c.Get)
-
+		links, err := crawlPage(s, c.Get)
 		if err != nil {
-			parent := ""
-			if s.Parent != nil {
-				parent = fmt.Sprintf(" on page %v", s.Parent)
-			}
-			c.Log.Printf("%v%s\n", err, parent)
-		}
-
-		if shouldUpdate {
-			s.URL.Scheme = "http"
-			results <- fmt.Sprintf("%v %v", s.Parent, s.URL.String())
+			c.Log.Println(err)
 		}
 
 		urls, err := toURLs(links, s.URL.Parse)
 		if err != nil {
-			c.Log.Printf("page %v: %v\n", s.URL, err)
+			c.Log.Println(err)
 		}
-
 		wait <- len(urls) - 1
 
 		// Submit links to queue in goroutine to not block workers
 		go queueURLs(queue, urls, s.URL, s.Depth-1)
-
 	}
 }
 
-func crawlSite(s site, get func(string) (*http.Response, error)) ([]string, bool, error) {
+// crawlPage - Crawls every page while getting og data
+func crawlPage(s site, get func(string) (*http.Response, error)) ([]string, error) {
 	u := s.URL
 	isExternal := s.Parent != nil && s.URL.Host != s.Parent.Host
 
-	// If an external link is http we try https.
-	// If it fails it is ignored and we carry on normally.
-	// On success we return it as a result.
-	if isExternal && u.Scheme == "http" {
-		u.Scheme = "https"
-		r2, err := get(u.String())
-		if err == nil {
-			defer r2.Body.Close()
-			if r2.StatusCode < 400 {
-				return nil, true, nil
-			}
-		}
-		u.Scheme = "http"
-	}
-
 	r, err := get(u.String())
 	if err != nil {
-		return nil, false, fmt.Errorf("failed to get %v: %v", u, err)
+		return nil, fmt.Errorf("failed to get %v: %v", u, err)
 	}
 	defer r.Body.Close()
 
@@ -261,15 +223,12 @@ func crawlSite(s site, get func(string) (*http.Response, error)) ([]string, bool
 		notFoundErrors = append(notFoundErrors, fmt.Sprintf("%d %v", r.StatusCode, u))
 	}
 
-	// Stop when redirecting to external page
 	if r.Request.URL.Host != u.Host {
 		isExternal = true
 	}
 
-	// Stop when site is external.
-	// Also stop if depth one is reached, ignored when depth is set to 0.
 	if isExternal || s.Depth == 1 {
-		return nil, false, err
+		return nil, err
 	}
 
 	p := Page{}.getOgData(u.String())
@@ -278,9 +237,10 @@ func crawlSite(s site, get func(string) (*http.Response, error)) ([]string, bool
 
 	links, err := getLinks(r.Body)
 
-	return links, false, err
+	return links, err
 }
 
+// getLinks - Get all <a> tags on page
 func getLinks(r io.Reader) ([]string, error) {
 	var links []string
 
@@ -294,7 +254,8 @@ func getLinks(r io.Reader) ([]string, error) {
 		if n.Type == html.ElementNode && n.Data == "a" {
 			for _, a := range n.Attr {
 				if a.Key == "href" {
-					links = append(links, a.Val)
+					tl := trimHash(a.Val)
+					links = append(links, tl)
 					break
 				}
 			}
@@ -333,19 +294,6 @@ func (p Page) getOgData(uri string) Page {
 	p.OpenGraph.PageURL = uri
 
 	return p
-}
-
-func fixUrl(href, base string) string {
-	uri, err := url.Parse(href)
-	if err != nil {
-		return ""
-	}
-	baseURL, err := url.Parse(base)
-	if err != nil {
-		return ""
-	}
-	uri = baseURL.ResolveReference(uri)
-	return uri.String()
 }
 
 func (og *OpenGraph) ToJSON() ([]byte, error) {
@@ -405,4 +353,20 @@ func (og *OpenGraph) ProcessMeta(metaAttrs map[string]string) {
 	case "og:image:type":
 		og.Image.Type = metaAttrs["content"]
 	}
+}
+
+// Checks if link contains hash, proceeds to trim if true
+func trimHash(l string) string {
+	if strings.Contains(l, "#") {
+		var index int
+		for n, str := range l {
+			if strconv.QuoteRune(str) == "'#'" {
+				index = n
+				break
+			}
+		}
+		return l[:index]
+	}
+
+	return l
 }
